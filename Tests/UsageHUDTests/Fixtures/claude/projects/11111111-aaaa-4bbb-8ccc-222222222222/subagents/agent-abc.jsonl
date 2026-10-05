@@ -1,0 +1,2 @@
+{"type":"assistant","timestamp":"2026-10-01T00:22:00Z","sessionId":"11111111-aaaa-4bbb-8ccc-222222222222","isSidechain":true,"message":{"model":"claude-sonnet-4-5","usage":{"input_tokens":900,"output_tokens":450,"cache_read_input_tokens":600}}}
+{"type":"assistant","timestamp":"2026-10-01T00:26:00Z","sessionId":"11111111-aaaa-4bbb-8ccc-222222222222","isSidechain":true,"message":{"model":"claude-sonnet-4-5","usage":{"input_tokens":1100,"output_tokens":520}}}

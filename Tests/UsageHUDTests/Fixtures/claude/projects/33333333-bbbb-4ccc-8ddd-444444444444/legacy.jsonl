@@ -1,0 +1,1 @@
+{"type":"assistant","timestamp":"2026-09-30T22:00:00Z","sessionId":"33333333-bbbb-4ccc-8ddd-444444444444","isSidechain":true,"message":{"model":"claude-opus-4","usage":{"input_tokens":200,"output_tokens":100}}}
