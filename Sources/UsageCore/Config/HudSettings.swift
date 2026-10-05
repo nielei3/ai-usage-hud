@@ -3,11 +3,18 @@ import Foundation
 public struct HudSettings: Sendable, Equatable {
     public var includeSidechains: Bool
     public var fiveHourLimitTokens: Int?
+    public var weeklyLimitTokens: Int?
     public var launchAtLogin: Bool
 
-    public init(includeSidechains: Bool = true, fiveHourLimitTokens: Int? = nil, launchAtLogin: Bool = false) {
+    public init(
+        includeSidechains: Bool = true,
+        fiveHourLimitTokens: Int? = nil,
+        weeklyLimitTokens: Int? = nil,
+        launchAtLogin: Bool = false
+    ) {
         self.includeSidechains = includeSidechains
         self.fiveHourLimitTokens = fiveHourLimitTokens
+        self.weeklyLimitTokens = weeklyLimitTokens
         self.launchAtLogin = launchAtLogin
     }
 }
@@ -39,6 +46,9 @@ public struct UserDefaultsSettingsStore: SettingsStore {
         if box.defaults.object(forKey: "fiveHourLimitTokens") != nil {
             settings.fiveHourLimitTokens = box.defaults.integer(forKey: "fiveHourLimitTokens")
         }
+        if box.defaults.object(forKey: "weeklyLimitTokens") != nil {
+            settings.weeklyLimitTokens = box.defaults.integer(forKey: "weeklyLimitTokens")
+        }
         settings.launchAtLogin = box.defaults.bool(forKey: "launchAtLogin")
         return settings
     }
@@ -49,6 +59,11 @@ public struct UserDefaultsSettingsStore: SettingsStore {
             box.defaults.set(cap, forKey: "fiveHourLimitTokens")
         } else {
             box.defaults.removeObject(forKey: "fiveHourLimitTokens")
+        }
+        if let cap = settings.weeklyLimitTokens {
+            box.defaults.set(cap, forKey: "weeklyLimitTokens")
+        } else {
+            box.defaults.removeObject(forKey: "weeklyLimitTokens")
         }
         box.defaults.set(settings.launchAtLogin, forKey: "launchAtLogin")
     }

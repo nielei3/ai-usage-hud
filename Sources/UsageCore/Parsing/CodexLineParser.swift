@@ -16,15 +16,18 @@ public struct CodexRateLimits: Sendable, Equatable {
     public var primary: CodexRateLimitWindow?
     public var secondary: CodexRateLimitWindow?
     public var planType: String?
+    public var creditBalance: Double?
 
     public init(
         primary: CodexRateLimitWindow? = nil,
         secondary: CodexRateLimitWindow? = nil,
-        planType: String? = nil
+        planType: String? = nil,
+        creditBalance: Double? = nil
     ) {
         self.primary = primary
         self.secondary = secondary
         self.planType = planType
+        self.creditBalance = creditBalance
     }
 }
 
@@ -70,7 +73,7 @@ public struct CodexLineParser {
         let info = payload["info"] as? [String: Any]
         let last = info.flatMap { tokenUsage($0["last_token_usage"]) }
         let total = info.flatMap { tokenUsage($0["total_token_usage"]) }
-        let limits = info.flatMap { rateLimits($0["rate_limits"]) }
+        let limits = rateLimits(payload["rate_limits"] ?? info?["rate_limits"])
 
         return CodexUsageRow(timestamp: ts, last: last, total: total, rateLimits: limits)
     }
@@ -113,10 +116,13 @@ public struct CodexLineParser {
 
     private func rateLimits(_ raw: Any?) -> CodexRateLimits? {
         guard let d = raw as? [String: Any] else { return nil }
+        let credits = d["credits"] as? [String: Any]
+        let balance = (credits?["balance"] as? Double) ?? (credits?["balance"] as? Int).map(Double.init)
         return CodexRateLimits(
             primary: window(d["primary"]),
             secondary: window(d["secondary"]),
-            planType: d["plan_type"] as? String
+            planType: d["plan_type"] as? String,
+            creditBalance: balance
         )
     }
 }

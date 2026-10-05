@@ -8,5 +8,7 @@ swift build -c release
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BIN/UsageHUD" "$APP/Contents/MacOS/UsageHUD"
 cp scripts/Info.plist "$APP/Contents/Info.plist"
+cp Sources/UsageHUD/Panel/Assets/claude-icon.png "$APP/Contents/Resources/claude-icon.png"
+cp Sources/UsageHUD/Panel/Assets/codex-icon.png "$APP/Contents/Resources/codex-icon.png"
 touch "$APP"
 echo "$APP"

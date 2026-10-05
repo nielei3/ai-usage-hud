@@ -11,10 +11,12 @@ public actor UsageEngine {
     public struct Feed: Sendable {
         public var claudeRoot: URL
         public var codexRoot: URL
+        public var claudeUsageCache: URL
 
-        public init(claudeRoot: URL, codexRoot: URL) {
+        public init(claudeRoot: URL, codexRoot: URL, claudeUsageCache: URL) {
             self.claudeRoot = claudeRoot
             self.codexRoot = codexRoot
+            self.claudeUsageCache = claudeUsageCache
         }
     }
 
@@ -41,6 +43,7 @@ public actor UsageEngine {
         var today: TokenUsage
         var block: TokenUsage
         var blockStart: Date?
+        var weekly: TokenUsage
         var sessions: Set<String>
         var lastActivity: Date?
         var lastModel: String?
@@ -50,6 +53,7 @@ public actor UsageEngine {
         var today: CodexTokenUsage
         var rateLimits: [RateLimitWindow]
         var planType: String?
+        var creditBalance: Double?
         var sessions: Set<String>
         var lastEvent: Date?
     }
@@ -64,6 +68,9 @@ public actor UsageEngine {
     }
 
     public func start() {
+        if let cached = loadSnapshotCache() {
+            sink?(cached)
+        }
         rescanAll()
     }
 
@@ -81,8 +88,9 @@ public actor UsageEngine {
         for url in found {
             recompute(url: url, now: now)
         }
-        let snapshot = fold(now: now)
         regime.recordFullScan(duration: clock.now().timeIntervalSince(started))
+        let snapshot = fold(now: now)
+        saveSnapshotCache(snapshot)
         sink?(snapshot)
     }
 
@@ -133,6 +141,27 @@ public actor UsageEngine {
         self.sink = sink
     }
 
+    private static var snapshotCacheURL: URL {
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        return home.appendingPathComponent(".claude/plugins/oh-my-claudecode/.usage-hud-snapshot.json")
+    }
+
+    private func loadSnapshotCache() -> UsageSnapshot? {
+        guard let data = try? Data(contentsOf: Self.snapshotCacheURL),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else { return nil }
+        return SnapshotCodec.decode(obj)
+    }
+
+    private func saveSnapshotCache(_ snapshot: UsageSnapshot) {
+        guard let obj = SnapshotCodec.encode(snapshot),
+              let data = try? JSONSerialization.data(withJSONObject: obj)
+        else { return }
+        let dir = Self.snapshotCacheURL.deletingLastPathComponent()
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        try? data.write(to: Self.snapshotCacheURL)
+    }
+
     // MARK: - Aggregation
 
     /// Per-file aggregate recompute — the ONLY place a file's content is
@@ -144,6 +173,7 @@ public actor UsageEngine {
         var today = TokenUsage()
         var block = TokenUsage()
         var blockStart: Date?
+        var weekly = TokenUsage()
         var sessions = Set<String>()
         var lastActivity: Date?
         var lastModel: String?
@@ -159,6 +189,9 @@ public actor UsageEngine {
                 blockStart = blockStart.map { min($0, row.timestamp) }
                     ?? BlockEstimate.anchor(earliestEvent: row.timestamp, now: now)
             }
+            if WindowMath.isWithinWeek(row.timestamp, now: now) {
+                weekly = weekly + row.usage
+            }
             sessions.insert(row.sessionId)
             if lastActivity == nil || row.timestamp > lastActivity! {
                 lastActivity = row.timestamp
@@ -167,6 +200,7 @@ public actor UsageEngine {
         }
         return ClaudeFileAggregate(
             today: today, block: block, blockStart: blockStart,
+            weekly: weekly,
             sessions: sessions, lastActivity: lastActivity, lastModel: lastModel
         )
     }
@@ -174,6 +208,7 @@ public actor UsageEngine {
     private func codexAggregate(url: URL, now: Date) -> CodexFileAggregate {
         var agg = codexFiles[url] ?? CodexFileAggregate(
             today: CodexTokenUsage(), rateLimits: [], planType: nil,
+            creditBalance: nil,
             sessions: [], lastEvent: nil
         )
         let key = url.path
@@ -191,6 +226,7 @@ public actor UsageEngine {
                     window.map { RateLimitWindow(windowMinutes: $0.windowMinutes, usedPercent: $0.usedPercent, resetsAt: $0.resetsAt) }
                 }
                 agg.planType = limits.planType ?? agg.planType
+                agg.creditBalance = limits.creditBalance ?? agg.creditBalance
             }
             let event = row.timestamp
             if event > (agg.lastEvent ?? .distantPast) {
@@ -210,12 +246,14 @@ public actor UsageEngine {
         var today = TokenUsage()
         var block = TokenUsage()
         var blockStart: Date?
+        var weekly = TokenUsage()
         var sessions = Set<String>()
         var lastActivity: Date?
         var lastModel: String?
         for agg in claudeFiles.values {
             today = today + agg.today
             block = block + agg.block
+            weekly = weekly + agg.weekly
             if let s = agg.blockStart { blockStart = blockStart.map { min($0, s) } ?? s }
             sessions.formUnion(agg.sessions)
             if let a = agg.lastActivity, a > (lastActivity ?? .distantPast) {
@@ -223,14 +261,23 @@ public actor UsageEngine {
                 lastModel = agg.lastModel
             }
         }
+        let cache = ClaudeUsageFetcher.fetch()
         let claude = UsageSnapshot.Claude(
             todayUsage: today, blockUsage: block, blockStart: blockStart,
+            weeklyUsage: weekly,
+            fiveHourPercent: cache?.fiveHourPercent,
+            fiveHourResetsAt: cache?.fiveHourResetsAt,
+            weeklyPercent: cache?.weeklyPercent,
+            weeklyResetsAt: cache?.weeklyResetsAt,
+            creditUsedUsd: cache?.creditUsedUsd,
+            creditLimitUsd: cache?.creditLimitUsd,
             activeSessions: sessions.count, lastActivity: lastActivity, lastModel: lastModel
         )
 
         var todayC = CodexTokenUsage()
         var rateLimits: [RateLimitWindow] = []
         var planType: String?
+        var creditBalance: Double?
         var sessionsC = Set<String>()
         var lastEvent: Date?
         for (url, agg) in codexFiles.sorted(by: { $0.key.path < $1.key.path }) {
@@ -240,10 +287,14 @@ public actor UsageEngine {
                 lastEvent = event
                 rateLimits = agg.rateLimits
                 planType = agg.planType
+                creditBalance = agg.creditBalance
             }
         }
+        let codexCache = CodexUsageFetcher.fetch()
         let codex = UsageSnapshot.Codex(
             todayUsage: todayC, rateLimits: rateLimits, planType: planType,
+            creditBalance: codexCache?.used,
+            creditLimit: codexCache?.limit,
             activeSessions: sessionsC.count, lastActivity: lastEvent
         )
         return UsageSnapshot(claude: claude, codex: codex)

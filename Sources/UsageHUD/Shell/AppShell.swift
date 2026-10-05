@@ -8,7 +8,7 @@ struct UsageHUDApp {
         let app = NSApplication.shared
         let delegate = AppDelegate()
         app.delegate = delegate
-        app.setActivationPolicy(.accessory)
+        app.setActivationPolicy(.regular)
         app.run()
     }
 }
@@ -23,7 +23,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         let locations = DataLocations.resolve()
         let engine = UsageEngine(
-            feed: .init(claudeRoot: locations.claudeRoot, codexRoot: locations.codexRoot),
+            feed: .init(
+                claudeRoot: locations.claudeRoot,
+                codexRoot: locations.codexRoot,
+                claudeUsageCache: locations.claudeUsageCache
+            ),
             clock: SystemClock()
         )
         let store = HudStore(engine: engine, settingsStore: settingsStore)
@@ -64,7 +68,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let watcher = FSEventsWatcher(roots: [locations.claudeRoot, locations.codexRoot]) { [weak engine] paths in
             Task { [weak engine] in
                 guard let engine else { return }
-                if await engine.regime.regime == .incrementalTail {
+                let isSweep = paths.allSatisfy { $0.hasDirectoryPath }
+                if isSweep {
+                    await engine.rescanAll()
+                } else if await engine.regime.regime == .incrementalTail {
                     await engine.tailPulse(changed: paths)
                 } else {
                     await engine.rescanAll()
@@ -74,6 +81,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         watcher.start()
         self.watcher = watcher
         controller.start()
+        panelController?.showPanel(anchor: nil)
     }
 
     @objc private func togglePanel(_ sender: Any?) {
