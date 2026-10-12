@@ -74,10 +74,18 @@ public actor UsageEngine {
         rescanAll()
     }
 
+    private var lastFullScan: Date = .distantPast
+    private let fullScanInterval: TimeInterval = 3600
+
     /// Cold start, 60s sweep, or sub-1s-regime event: rescan every candidate.
     public func rescanAll() {
-        let started = clock.now()
-        let now = started
+        let now = clock.now()
+        if now.timeIntervalSince(lastFullScan) < fullScanInterval, !claudeFiles.isEmpty {
+            sink?(fold(now: now))
+            return
+        }
+        lastFullScan = now
+        let started = now
         let found = CandidateSet(clock: clock)
             .files(claudeRoot: feed.claudeRoot, codexRoot: feed.codexRoot, now: now)
         candidates = Set(found)
@@ -177,10 +185,10 @@ public actor UsageEngine {
         var sessions = Set<String>()
         var lastActivity: Date?
         var lastModel: String?
-        let lines = (try? StreamingLineReader(url: url).lines()) ?? []
-        for line in lines {
-            guard let row = ClaudeLineParser().parse(line) else { continue }
-            if row.isSidechain, !includeSidechains { continue }
+        let reader = StreamingLineReader(url: url)
+        func process(_ line: String) throws {
+            guard let row = ClaudeLineParser().parse(line) else { return }
+            if row.isSidechain, !includeSidechains { return }
             if WindowMath.isToday(row.timestamp, now: now, clock: clock) {
                 today = today + row.usage
             }
@@ -198,6 +206,7 @@ public actor UsageEngine {
                 lastModel = row.model ?? lastModel
             }
         }
+        try? reader.forEachLine(process)
         return ClaudeFileAggregate(
             today: today, block: block, blockStart: blockStart,
             weekly: weekly,
