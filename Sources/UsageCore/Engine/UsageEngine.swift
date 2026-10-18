@@ -67,6 +67,19 @@ public actor UsageEngine {
         includeSidechains = value
     }
 
+    /// Returns the new rate-limit windows if at least one is non-nil;
+    /// otherwise keeps the existing windows so a null-window rollout event
+    /// never wipes out real windows from an older event.
+    public static func mergeRateLimits(
+        current: [RateLimitWindow], from new: CodexRateLimits?
+    ) -> [RateLimitWindow] {
+        guard let limits = new else { return current }
+        let mapped = [limits.primary, limits.secondary].compactMap { window in
+            window.map { RateLimitWindow(windowMinutes: $0.windowMinutes, usedPercent: $0.usedPercent, resetsAt: $0.resetsAt) }
+        }
+        return mapped.isEmpty ? current : mapped
+    }
+
     public func start() {
         if let cached = loadSnapshotCache() {
             sink?(cached)
@@ -222,9 +235,7 @@ public actor UsageEngine {
             let delta = deltas.absorb(row: row, today: { WindowMath.isToday($0, now: now, clock: clock) }, fileKey: key)
             agg.today = agg.today + delta
             if let limits = row.rateLimits {
-                agg.rateLimits = [limits.primary, limits.secondary].compactMap { window in
-                    window.map { RateLimitWindow(windowMinutes: $0.windowMinutes, usedPercent: $0.usedPercent, resetsAt: $0.resetsAt) }
-                }
+                agg.rateLimits = Self.mergeRateLimits(current: agg.rateLimits, from: limits)
                 agg.planType = limits.planType ?? agg.planType
                 agg.creditBalance = limits.creditBalance ?? agg.creditBalance
             }
@@ -291,8 +302,11 @@ public actor UsageEngine {
             }
         }
         let codexCache = CodexUsageFetcher.fetch()
+        let apiWindows: [RateLimitWindow] = [codexCache?.primaryWindow, codexCache?.secondaryWindow].compactMap { window in
+            window.map { RateLimitWindow(windowMinutes: $0.windowMinutes, usedPercent: $0.usedPercent, resetsAt: $0.resetsAt) }
+        }
         let codex = UsageSnapshot.Codex(
-            todayUsage: todayC, rateLimits: rateLimits, planType: planType,
+            todayUsage: todayC, rateLimits: apiWindows.isEmpty ? rateLimits : apiWindows, planType: planType,
             creditBalance: codexCache?.used,
             creditLimit: codexCache?.limit,
             activeSessions: sessionsC.count, lastActivity: lastEvent

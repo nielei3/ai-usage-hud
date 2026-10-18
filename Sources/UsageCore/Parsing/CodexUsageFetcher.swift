@@ -1,5 +1,17 @@
 import Foundation
 
+public struct ApiRateLimitWindow: Sendable, Equatable {
+    public var usedPercent: Double
+    public var windowMinutes: Int
+    public var resetsAt: Date
+
+    public init(usedPercent: Double, windowMinutes: Int, resetsAt: Date) {
+        self.usedPercent = usedPercent
+        self.windowMinutes = windowMinutes
+        self.resetsAt = resetsAt
+    }
+}
+
 /// Fetches Codex credit usage directly from the ChatGPT backend API.
 /// Endpoint: GET https://chatgpt.com/backend-api/wham/usage
 /// Auth: Bearer token + ChatGPT-Account-Id header from ~/.codex/auth.json
@@ -9,12 +21,21 @@ public struct CodexUsageFetcher: Sendable {
         public var limit: Double?
         public var remaining: Double?
         public var usedPercent: Double?
+        public var primaryWindow: ApiRateLimitWindow?
+        public var secondaryWindow: ApiRateLimitWindow?
 
-        public init(used: Double? = nil, limit: Double? = nil, remaining: Double? = nil, usedPercent: Double? = nil) {
+        public init(
+            used: Double? = nil, limit: Double? = nil, remaining: Double? = nil,
+            usedPercent: Double? = nil,
+            primaryWindow: ApiRateLimitWindow? = nil,
+            secondaryWindow: ApiRateLimitWindow? = nil
+        ) {
             self.used = used
             self.limit = limit
             self.remaining = remaining
             self.usedPercent = usedPercent
+            self.primaryWindow = primaryWindow
+            self.secondaryWindow = secondaryWindow
         }
     }
 
@@ -40,6 +61,45 @@ public struct CodexUsageFetcher: Sendable {
         return home.appendingPathComponent(".claude/plugins/oh-my-claudecode/.usage-hud-codex-cache.json")
     }
 
+    /// Pure JSON parsing of the wham/usage response — testable without network.
+    public static func parseUsageResponse(_ data: Data) -> CreditData? {
+        guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              obj["error"] == nil
+        else { return nil }
+
+        let spendControl = obj["spend_control"] as? [String: Any]
+        let individualLimit = spendControl?["individual_limit"] as? [String: Any]
+
+        let used = (individualLimit?["used"] as? String).flatMap(Double.init)
+        let limit = (individualLimit?["limit"] as? String).flatMap(Double.init)
+        let remaining = (individualLimit?["remaining"] as? String).flatMap(Double.init)
+        let usedPercent: Double? = {
+            guard let u = used, let l = limit, l > 0 else { return nil }
+            return min(max(u / l * 100, 0), 100)
+        }()
+
+        let rateLimit = obj["rate_limit"] as? [String: Any]
+        let primaryWindow = parseApiWindow(rateLimit?["primary_window"])
+        let secondaryWindow = parseApiWindow(rateLimit?["secondary_window"])
+
+        return CreditData(
+            used: used, limit: limit, remaining: remaining, usedPercent: usedPercent,
+            primaryWindow: primaryWindow, secondaryWindow: secondaryWindow
+        )
+    }
+
+    private static func parseApiWindow(_ raw: Any?) -> ApiRateLimitWindow? {
+        guard let d = raw as? [String: Any] else { return nil }
+        let usedPercent = NumericParsing.double(d["used_percent"]) ?? 0
+        let seconds = NumericParsing.int(d["limit_window_seconds"])
+        guard let resetAt = NumericParsing.double(d["reset_at"]) else { return nil }
+        return ApiRateLimitWindow(
+            usedPercent: usedPercent,
+            windowMinutes: seconds / 60,
+            resetsAt: Date(timeIntervalSince1970: resetAt)
+        )
+    }
+
     private static func loadDiskCache() -> CreditData? {
         guard let data = try? Data(contentsOf: diskCacheURL),
               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
@@ -48,17 +108,45 @@ public struct CodexUsageFetcher: Sendable {
             used: (obj["used"] as? Double) ?? (obj["used"] as? String).flatMap(Double.init),
             limit: (obj["limit"] as? Double) ?? (obj["limit"] as? String).flatMap(Double.init),
             remaining: (obj["remaining"] as? Double) ?? (obj["remaining"] as? String).flatMap(Double.init),
-            usedPercent: (obj["usedPercent"] as? Double) ?? (obj["usedPercent"] as? Int).map(Double.init)
+            usedPercent: (obj["usedPercent"] as? Double) ?? (obj["usedPercent"] as? Int).map(Double.init),
+            primaryWindow: parseDiskWindow(obj["primaryWindow"]),
+            secondaryWindow: parseDiskWindow(obj["secondaryWindow"])
+        )
+    }
+
+    private static func parseDiskWindow(_ raw: Any?) -> ApiRateLimitWindow? {
+        guard let d = raw as? [String: Any] else { return nil }
+        let usedPercent = NumericParsing.double(d["usedPercent"]) ?? 0
+        let windowMinutes = NumericParsing.int(d["windowMinutes"])
+        guard let resetAt = NumericParsing.double(d["resetsAt"]) else { return nil }
+        return ApiRateLimitWindow(
+            usedPercent: usedPercent,
+            windowMinutes: windowMinutes,
+            resetsAt: Date(timeIntervalSince1970: resetAt)
         )
     }
 
     private static func saveDiskCache(_ data: CreditData) {
-        let obj: [String: Any] = [
+        var obj: [String: Any] = [
             "used": data.used as Any,
             "limit": data.limit as Any,
             "remaining": data.remaining as Any,
             "usedPercent": data.usedPercent as Any,
         ]
+        if let w = data.primaryWindow {
+            obj["primaryWindow"] = [
+                "usedPercent": w.usedPercent,
+                "windowMinutes": w.windowMinutes,
+                "resetsAt": w.resetsAt.timeIntervalSince1970
+            ] as [String: Any]
+        }
+        if let w = data.secondaryWindow {
+            obj["secondaryWindow"] = [
+                "usedPercent": w.usedPercent,
+                "windowMinutes": w.windowMinutes,
+                "resetsAt": w.resetsAt.timeIntervalSince1970
+            ] as [String: Any]
+        }
         let dir = diskCacheURL.deletingLastPathComponent()
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         if let json = try? JSONSerialization.data(withJSONObject: obj) {
@@ -90,23 +178,8 @@ public struct CodexUsageFetcher: Sendable {
         req.timeoutInterval = 10
 
         guard let data = try? URLSession.synchronousData(from: req),
-              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+              let result = parseUsageResponse(data)
         else { return cachedData }
-
-        if obj["error"] != nil { return cachedData }
-
-        let spendControl = obj["spend_control"] as? [String: Any]
-        let individualLimit = spendControl?["individual_limit"] as? [String: Any]
-
-        let used = (individualLimit?["used"] as? String).flatMap(Double.init)
-        let limit = (individualLimit?["limit"] as? String).flatMap(Double.init)
-        let remaining = (individualLimit?["remaining"] as? String).flatMap(Double.init)
-        let usedPercent: Double? = {
-            guard let u = used, let l = limit, l > 0 else { return nil }
-            return min(max(u / l * 100, 0), 100)
-        }()
-
-        let result = CreditData(used: used, limit: limit, remaining: remaining, usedPercent: usedPercent)
 
         lock.lock()
         cachedData = result
