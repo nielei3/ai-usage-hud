@@ -2,8 +2,9 @@ import CoreServices
 import Foundation
 
 /// One FSEvents stream per root directory (fileEvents, 0.5s latency, background
-/// queue). Delivers changed paths on every event; a 60s timer backstop re-derives
-/// the candidate set in case coalescing swallows an event.
+/// queue). Changed paths accumulate in a Set and are delivered as one batch
+/// after a 300ms debounce; a 60s timer backstop re-derives the candidate set
+/// in case coalescing swallows an event.
 public final class FSEventsWatcher: @unchecked Sendable {
     private let roots: [URL]
     private let onChange: @Sendable ([URL]) -> Void
@@ -11,6 +12,8 @@ public final class FSEventsWatcher: @unchecked Sendable {
     private let queue: DispatchQueue
     private let sweepTimer: DispatchSourceTimer
     private var sweepRunning = false
+    private let debounceTimer: DispatchSourceTimer
+    private var pendingPaths = Set<URL>()
 
     /// Char-pointer interpretation: the stream is created WITHOUT
     /// kFSEventStreamCreateFlagUseCFTypes, so `paths` is a
@@ -23,10 +26,20 @@ public final class FSEventsWatcher: @unchecked Sendable {
 
         let timer = DispatchSource.makeTimerSource(queue: queue)
         sweepTimer = timer
+        let debounce = DispatchSource.makeTimerSource(queue: queue)
+        debounceTimer = debounce
+
         timer.schedule(deadline: .now() + 60, repeating: 60)
         timer.setEventHandler { [weak self] in
             guard let self else { return }
             self.onChange(self.roots)
+        }
+
+        debounce.setEventHandler { [weak self] in
+            guard let self else { return }
+            let paths = Array(self.pendingPaths)
+            self.pendingPaths.removeAll()
+            self.onChange(paths)
         }
     }
 
@@ -37,7 +50,7 @@ public final class FSEventsWatcher: @unchecked Sendable {
             let raw = UnsafeBufferPointer(start: paths.assumingMemoryBound(to: UnsafePointer<CChar>?.self), count: count)
             let changed = raw.compactMap { $0.map { URL(fileURLWithPath: String(cString: $0)) } }
             guard !changed.isEmpty else { return }
-            watcher.queue.async { watcher.onChange(changed) }
+            watcher.deliver(changed)
         }
 
         var ctx = FSEventStreamContext(
@@ -53,12 +66,22 @@ public final class FSEventsWatcher: @unchecked Sendable {
         guard let stream else {
             // No stream → the 60s sweep is the only change signal; keep it alive.
             resumeSweep()
+            debounceTimer.resume()
             return
         }
         self.stream = stream
         FSEventStreamSetDispatchQueue(stream, queue)
         FSEventStreamStart(stream)
         resumeSweep()
+        debounceTimer.resume()
+    }
+
+    public func deliver(_ paths: [URL]) {
+        queue.async { [weak self] in
+            guard let self else { return }
+            self.pendingPaths.formUnion(paths)
+            self.debounceTimer.schedule(deadline: .now() + .milliseconds(300), repeating: .never)
+        }
     }
 
     public func stop() {
@@ -70,6 +93,7 @@ public final class FSEventsWatcher: @unchecked Sendable {
         self.stream = nil
         sweepTimer.cancel()
         sweepRunning = false
+        debounceTimer.cancel()
     }
 
     private func resumeSweep() {

@@ -1,8 +1,19 @@
 import Foundation
 
+public struct QuotaSnapshot: Sendable, Equatable {
+    public var claude: ClaudeUsageFetcher.UsageData?
+    public var codex: CodexUsageFetcher.CreditData?
+
+    public init(claude: ClaudeUsageFetcher.UsageData? = nil, codex: CodexUsageFetcher.CreditData? = nil) {
+        self.claude = claude
+        self.codex = codex
+    }
+}
+
 /// The ONLY filesystem-touching component. Owns CandidateSet, TailReader,
-/// DeltaAccumulator and RegimeSwitch; rescans or tails per Regime on every
-/// FSEvents batch, then republishes a fresh UsageSnapshot via the sink.
+/// DeltaAccumulator and RegimeSwitch; rescans on cold start / 60s sweep,
+/// tails on every FSEvents file event, then republishes a fresh
+/// UsageSnapshot via the sink.
 ///
 /// Aggregation: per-file aggregates are MERGED — today tokens sum across
 /// files, session sets union, the 5h anchor is the earliest qualifying row
@@ -30,7 +41,7 @@ public actor UsageEngine {
     private var includeSidechains = true
     private var positions: [URL: TailPosition] = [:]
     private var deltas = DeltaAccumulator()
-    /// Read by AppShell to route FSEvents batches (tail vs full rescan).
+    private var quota = QuotaSnapshot()
     public private(set) var regime = RegimeSwitch()
     private var candidates = Set<URL>()
     // Per-file aggregates: the ONLY aggregation ledger. A changed file
@@ -67,6 +78,10 @@ public actor UsageEngine {
         includeSidechains = value
     }
 
+    public func setQuota(_ value: QuotaSnapshot) {
+        quota = value
+    }
+
     public func start() {
         if let cached = loadSnapshotCache() {
             sink?(cached)
@@ -74,7 +89,7 @@ public actor UsageEngine {
         rescanAll()
     }
 
-    /// Cold start, 60s sweep, or sub-1s-regime event: rescan every candidate.
+    /// Cold start, 60s sweep: rescan every candidate.
     public func rescanAll() {
         let started = clock.now()
         let now = started
@@ -94,8 +109,8 @@ public actor UsageEngine {
         sink?(snapshot)
     }
 
-    /// >1s regime: tail each candidate from its stored offset, then recompute
-    /// everything from the merged per-file aggregates.
+    /// Every FSEvents file event: tail each changed candidate from its
+    /// stored offset, then recompute from the merged per-file aggregates.
     public func tailPulse(changed: [URL]) {
         let now = clock.now()
         var touched = Set(changed)
@@ -103,10 +118,8 @@ public actor UsageEngine {
         for url in changed where CandidateSet.isCandidate(url, cutoff: cutoff) {
             candidates.insert(url)
         }
-        // Hygiene: a re-scan drops candidates whose mtime fell below cutoff.
         candidates = Set(candidates.filter { CandidateSet.isCandidate($0, cutoff: cutoff) })
         touched.formIntersection(candidates)
-        // Drop files that fell out of the candidate set (mtime below cutoff).
         claudeFiles = claudeFiles.filter { candidates.contains($0.key) }
         codexFiles = codexFiles.filter { candidates.contains($0.key) }
         guard !touched.isEmpty else {
@@ -165,44 +178,53 @@ public actor UsageEngine {
     // MARK: - Aggregation
 
     /// Per-file aggregate recompute — the ONLY place a file's content is
-    /// read. Claude: one full streaming parse (bounded RSS; a 2GB session
-    /// re-parses only when THAT file changes). Codex: per-file incremental
-    /// tail; the aggregate accumulates ONLY this file's new deltas and
-    /// fold() owns the cross-file merge.
+    /// read. Claude: incremental tail from stored position (cold start
+    /// streams the full file via forEachLine, bounded RSS). Codex:
+    /// per-file incremental tail; the aggregate accumulates ONLY this
+    /// file's new deltas and fold() owns the cross-file merge.
     private func claudeAggregate(url: URL, now: Date) -> ClaudeFileAggregate {
-        var today = TokenUsage()
-        var block = TokenUsage()
-        var blockStart: Date?
-        var weekly = TokenUsage()
-        var sessions = Set<String>()
-        var lastActivity: Date?
-        var lastModel: String?
-        let lines = (try? StreamingLineReader(url: url).lines()) ?? []
-        for line in lines {
-            guard let row = ClaudeLineParser().parse(line) else { continue }
-            if row.isSidechain, !includeSidechains { continue }
-            if WindowMath.isToday(row.timestamp, now: now, clock: clock) {
-                today = today + row.usage
+        var agg = claudeFiles[url] ?? ClaudeFileAggregate(
+            today: TokenUsage(), block: TokenUsage(), blockStart: nil,
+            weekly: TokenUsage(), sessions: [], lastActivity: nil, lastModel: nil
+        )
+        if let position = positions[url] {
+            guard let tail = try? TailReader.read(url: url, from: position) else { return agg }
+            positions[url] = tail.position
+            for line in tail.newLines {
+                accumulateClaudeLine(line, now: now, agg: &agg)
             }
-            if WindowMath.isWithinFiveHours(row.timestamp, now: now) {
-                block = block + row.usage
-                blockStart = blockStart.map { min($0, row.timestamp) }
-                    ?? BlockEstimate.anchor(earliestEvent: row.timestamp, now: now)
+        } else {
+            let reader = StreamingLineReader(url: url)
+            try? reader.forEachLine { line in
+                accumulateClaudeLine(line, now: now, agg: &agg)
             }
-            if WindowMath.isWithinWeek(row.timestamp, now: now) {
-                weekly = weekly + row.usage
-            }
-            sessions.insert(row.sessionId)
-            if lastActivity == nil || row.timestamp > lastActivity! {
-                lastActivity = row.timestamp
-                lastModel = row.model ?? lastModel
+            let attrs = try? FileManager.default.attributesOfItem(atPath: url.path)
+            if let size = attrs?[.size] as? Int {
+                positions[url] = TailPosition(byteOffset: size, partialCarry: "")
             }
         }
-        return ClaudeFileAggregate(
-            today: today, block: block, blockStart: blockStart,
-            weekly: weekly,
-            sessions: sessions, lastActivity: lastActivity, lastModel: lastModel
-        )
+        return agg
+    }
+
+    private func accumulateClaudeLine(_ line: String, now: Date, agg: inout ClaudeFileAggregate) {
+        guard let row = ClaudeLineParser().parse(line) else { return }
+        if row.isSidechain, !includeSidechains { return }
+        if WindowMath.isToday(row.timestamp, now: now, clock: clock) {
+            agg.today = agg.today + row.usage
+        }
+        if WindowMath.isWithinFiveHours(row.timestamp, now: now) {
+            agg.block = agg.block + row.usage
+            agg.blockStart = agg.blockStart.map { min($0, row.timestamp) }
+                ?? BlockEstimate.anchor(earliestEvent: row.timestamp, now: now)
+        }
+        if WindowMath.isWithinWeek(row.timestamp, now: now) {
+            agg.weekly = agg.weekly + row.usage
+        }
+        agg.sessions.insert(row.sessionId)
+        if agg.lastActivity == nil || row.timestamp > agg.lastActivity! {
+            agg.lastActivity = row.timestamp
+            agg.lastModel = row.model ?? agg.lastModel
+        }
     }
 
     private func codexAggregate(url: URL, now: Date) -> CodexFileAggregate {
@@ -261,7 +283,7 @@ public actor UsageEngine {
                 lastModel = agg.lastModel
             }
         }
-        let cache = ClaudeUsageFetcher.fetch()
+        let cache = quota.claude
         let claude = UsageSnapshot.Claude(
             todayUsage: today, blockUsage: block, blockStart: blockStart,
             weeklyUsage: weekly,
@@ -290,7 +312,7 @@ public actor UsageEngine {
                 creditBalance = agg.creditBalance
             }
         }
-        let codexCache = CodexUsageFetcher.fetch()
+        let codexCache = quota.codex
         let codex = UsageSnapshot.Codex(
             todayUsage: todayC, rateLimits: rateLimits, planType: planType,
             creditBalance: codexCache?.used,
