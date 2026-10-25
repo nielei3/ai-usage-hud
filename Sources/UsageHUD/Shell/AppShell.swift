@@ -19,6 +19,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var panelController: PanelWindowController?
     private var watcher: FSEventsWatcher?
     private let settingsStore = UserDefaultsSettingsStore()
+    private var quotaTimer: DispatchSourceTimer?
+    private let quotaQueue = DispatchQueue(label: "usage-hud.quota", qos: .utility)
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         let locations = DataLocations.resolve()
@@ -64,17 +66,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             await engine.start()
         }
 
-        // FSEvents → tailPulse (or rescanAll per Regime), 60s sweep → rescanAll.
+        startQuotaTimer(engine: engine)
+
+        // FSEvents → tailPulse, 60s sweep → rescanAll.
         let watcher = FSEventsWatcher(roots: [locations.claudeRoot, locations.codexRoot]) { [weak engine] paths in
             Task { [weak engine] in
                 guard let engine else { return }
-                let isSweep = paths.allSatisfy { $0.hasDirectoryPath }
+                let rootPaths = Set([locations.claudeRoot.path, locations.codexRoot.path])
+                let isSweep = paths.contains { rootPaths.contains($0.path) }
                 if isSweep {
                     await engine.rescanAll()
-                } else if await engine.regime.regime == .incrementalTail {
-                    await engine.tailPulse(changed: paths)
                 } else {
-                    await engine.rescanAll()
+                    await engine.tailPulse(changed: paths)
                 }
             }
         }
@@ -84,11 +87,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         panelController?.showPanel(anchor: nil)
     }
 
+    private func startQuotaTimer(engine: UsageEngine) {
+        let timer = DispatchSource.makeTimerSource(queue: quotaQueue)
+        quotaTimer = timer
+        timer.schedule(deadline: .now(), repeating: 120)
+        timer.setEventHandler { [weak engine] in
+            let claude = ClaudeUsageFetcher.fetch()
+            let codex = CodexUsageFetcher.fetch()
+            let snapshot = QuotaSnapshot(claude: claude, codex: codex)
+            Task { [weak engine] in
+                await engine?.setQuota(snapshot)
+                await engine?.tailPulse(changed: [])
+            }
+        }
+        timer.resume()
+    }
+
     @objc private func togglePanel(_ sender: Any?) {
         panelController?.toggle(anchor: statusItem?.button)
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        quotaTimer?.cancel()
         watcher?.stop()
         panelController?.stop()
         if let item = statusItem {
