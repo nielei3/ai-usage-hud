@@ -23,11 +23,13 @@ public actor UsageEngine {
         public var claudeRoot: URL
         public var codexRoot: URL
         public var claudeUsageCache: URL
+        public var snapshotCacheURL: URL?
 
-        public init(claudeRoot: URL, codexRoot: URL, claudeUsageCache: URL) {
+        public init(claudeRoot: URL, codexRoot: URL, claudeUsageCache: URL, snapshotCacheURL: URL? = nil) {
             self.claudeRoot = claudeRoot
             self.codexRoot = codexRoot
             self.claudeUsageCache = claudeUsageCache
+            self.snapshotCacheURL = snapshotCacheURL
         }
     }
 
@@ -139,6 +141,14 @@ public actor UsageEngine {
 
     /// One file, one aggregate — the ONLY place a file's content is read.
     private func recompute(url: URL, now: Date) {
+        if let position = positions[url],
+           let size = (try? FileManager.default.attributesOfItem(atPath: url.path)[.size]) as? Int,
+           size < position.byteOffset {
+            positions[url] = nil
+            claudeFiles[url] = nil
+            codexFiles[url] = nil
+            deltas.reset(fileKey: url.path)
+        }
         switch provenance(of: url) {
         case .claude:
             claudeFiles[url] = claudeAggregate(url: url, now: now)
@@ -154,13 +164,14 @@ public actor UsageEngine {
         self.sink = sink
     }
 
-    private static var snapshotCacheURL: URL {
+    private var snapshotCacheURL: URL {
+        if let url = feed.snapshotCacheURL { return url }
         let home = FileManager.default.homeDirectoryForCurrentUser
         return home.appendingPathComponent(".claude/plugins/oh-my-claudecode/.usage-hud-snapshot.json")
     }
 
     private func loadSnapshotCache() -> UsageSnapshot? {
-        guard let data = try? Data(contentsOf: Self.snapshotCacheURL),
+        guard let data = try? Data(contentsOf: snapshotCacheURL),
               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
         else { return nil }
         return SnapshotCodec.decode(obj)
@@ -170,38 +181,24 @@ public actor UsageEngine {
         guard let obj = SnapshotCodec.encode(snapshot),
               let data = try? JSONSerialization.data(withJSONObject: obj)
         else { return }
-        let dir = Self.snapshotCacheURL.deletingLastPathComponent()
+        let dir = snapshotCacheURL.deletingLastPathComponent()
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        try? data.write(to: Self.snapshotCacheURL)
+        try? data.write(to: snapshotCacheURL)
     }
 
     // MARK: - Aggregation
 
-    /// Per-file aggregate recompute — the ONLY place a file's content is
-    /// read. Claude: incremental tail from stored position (cold start
-    /// streams the full file via forEachLine, bounded RSS). Codex:
-    /// per-file incremental tail; the aggregate accumulates ONLY this
-    /// file's new deltas and fold() owns the cross-file merge.
+    /// Streams each file's new complete rows into its retained aggregate.
     private func claudeAggregate(url: URL, now: Date) -> ClaudeFileAggregate {
         var agg = claudeFiles[url] ?? ClaudeFileAggregate(
             today: TokenUsage(), block: TokenUsage(), blockStart: nil,
             weekly: TokenUsage(), sessions: [], lastActivity: nil, lastModel: nil
         )
-        if let position = positions[url] {
-            guard let tail = try? TailReader.read(url: url, from: position) else { return agg }
-            positions[url] = tail.position
-            for line in tail.newLines {
-                accumulateClaudeLine(line, now: now, agg: &agg)
-            }
-        } else {
-            let reader = StreamingLineReader(url: url)
-            try? reader.forEachLine { line in
-                accumulateClaudeLine(line, now: now, agg: &agg)
-            }
-            let attrs = try? FileManager.default.attributesOfItem(atPath: url.path)
-            if let size = attrs?[.size] as? Int {
-                positions[url] = TailPosition(byteOffset: size, partialCarry: "")
-            }
+        let position = positions[url] ?? TailPosition()
+        if let next = try? TailReader.forEachLine(url: url, from: position, { line in
+            accumulateClaudeLine(line, now: now, agg: &agg)
+        }) {
+            positions[url] = next
         }
         return agg
     }
@@ -235,12 +232,8 @@ public actor UsageEngine {
         )
         let key = url.path
         let position = positions[url] ?? TailPosition()
-        guard let tail = try? TailReader.read(url: url, from: position) else {
-            return agg
-        }
-        positions[url] = tail.position
-        for line in tail.newLines {
-            guard let row = CodexLineParser().parse(line) else { continue }
+        if let next = try? TailReader.forEachLine(url: url, from: position, { line in
+            guard let row = CodexLineParser().parse(line) else { return }
             let delta = deltas.absorb(row: row, today: { WindowMath.isToday($0, now: now, clock: clock) }, fileKey: key)
             agg.today = agg.today + delta
             if let limits = row.rateLimits {
@@ -255,6 +248,8 @@ public actor UsageEngine {
                 agg.lastEvent = event
             }
             agg.sessions.insert(key)
+        }) {
+            positions[url] = next
         }
         return agg
     }

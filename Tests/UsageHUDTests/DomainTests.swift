@@ -11,21 +11,19 @@ import Testing
         return ManualClock(start: midnight.addingTimeInterval(30 * 60), timeZone: cal.timeZone)
     }
 
-    @Test func cutoffIsMinOfMidnightAndNowMinus5h() {
-        // Fixture 'now' is 00:30 local; now-5h (19:30 prev day) precedes local midnight,
-        // so the min() must land on now-5h, not midnight.
+    @Test func cutoffUsesWeekLookbackAtMidnight() {
         let clock = clock
         let now = clock.now()
         let cutoff = WindowMath.candidateCutoff(now: now, clock: clock)
-        #expect(cutoff == now.addingTimeInterval(-5 * 3600))
+        #expect(cutoff == now.addingTimeInterval(-7 * 24 * 3600))
     }
 
-    @Test func cutoffFallsBackToNowMinus5hInsideFirstFiveHours() {
+    @Test func cutoffUsesWeekLookbackInsideFirstFiveHours() {
         var clock = clock
         clock.advance(by: 2 * 3600)
         let now = clock.now()
         let cutoff = WindowMath.candidateCutoff(now: now, clock: clock)
-        #expect(cutoff == now.addingTimeInterval(-5 * 3600))
+        #expect(cutoff == now.addingTimeInterval(-7 * 24 * 3600))
     }
 
     @Test func isTodayRespectsInjectedTimeZone() {

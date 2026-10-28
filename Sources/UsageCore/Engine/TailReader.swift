@@ -1,14 +1,17 @@
 import Foundation
 
 public struct TailPosition: Sendable, Equatable {
-    /// Byte offset of the next UNREAD byte — points PAST a trailing fragment.
-    /// The fragment lives in `partialCarry` and completes on the next read.
+    /// Byte offset past the trailing fragment retained in this position.
     public var byteOffset: Int
-    public var partialCarry: String
+    var partialBytes: Data
+    public var partialCarry: String {
+        get { String(decoding: partialBytes, as: UTF8.self) }
+        set { partialBytes = Data(newValue.utf8) }
+    }
 
     public init(byteOffset: Int = 0, partialCarry: String = "") {
         self.byteOffset = byteOffset
-        self.partialCarry = partialCarry
+        self.partialBytes = Data(partialCarry.utf8)
     }
 }
 
@@ -23,16 +26,42 @@ public struct TailReadResult: Sendable, Equatable {
 }
 
 public enum TailReader {
-    /// Incremental read. Semantics: `byteOffset` points past the fragment;
-    /// the fragment lives in `partialCarry` and completes on the next read.
     public static func read(url: URL, from position: TailPosition) throws -> TailReadResult {
-        try readData(url: url, from: position) { chunk in
-            splitLines(carrying: chunk.carry, chunk: chunk.text, byteOffset: chunk.offset)
-        }
+        var lines: [String] = []
+        let next = try forEachLine(url: url, from: position) { lines.append($0) }
+        return TailReadResult(newLines: lines, position: next)
     }
 
-    /// Truncation (file shrank below the offset) resets to zero so the next
-    /// read re-ingests the whole replacement file.
+    /// Emits complete nonempty UTF-8 lines; the returned position retains unfinished bytes.
+    public static func forEachLine(
+        url: URL,
+        from position: TailPosition,
+        chunkSize: Int = 1 << 20,
+        _ body: (String) throws -> Void
+    ) throws -> TailPosition {
+        let handle = try FileHandle(forReadingFrom: url)
+        defer { try? handle.close() }
+        let size = Int(try handle.seekToEnd())
+        let start = size < position.byteOffset ? TailPosition() : position
+        var pending = start.partialBytes
+        let offset = try readChunks(handle: handle, offset: start.byteOffset, size: size, chunkSize: chunkSize) { chunk, _ in
+            pending.append(chunk)
+            guard let lastNewline = pending.lastIndex(of: UInt8(ascii: "\n")) else { return }
+            let complete = pending.prefix(through: lastNewline)
+            // Copy the remainder so it cannot retain the consumed chunk's backing storage.
+            pending = pending.subdata(in: pending.index(after: lastNewline)..<pending.endIndex)
+            for line in complete.split(separator: UInt8(ascii: "\n"), omittingEmptySubsequences: true) {
+                try autoreleasepool {
+                    if let text = String(data: Data(line), encoding: .utf8) { try body(text) }
+                }
+            }
+        }
+        var next = TailPosition(byteOffset: offset)
+        next.partialBytes = pending
+        return next
+    }
+
+    /// Compatibility collector; callbacks receive bounded chunks and carry their trailing text.
     public static func readData(
         url: URL,
         from position: TailPosition,
@@ -42,75 +71,56 @@ public enum TailReader {
         let handle = try FileHandle(forReadingFrom: url)
         defer { try? handle.close() }
         let size = Int(try handle.seekToEnd())
-        var offset = position.byteOffset
-        var carry = position.partialCarry
-        if size < offset {
-            offset = 0
-            carry = ""
-        }
-        guard size > offset else {
-            return TailReadResult(newLines: [], position: TailPosition(byteOffset: offset, partialCarry: carry))
-        }
-        try handle.seek(toOffset: UInt64(offset))
+        let start = size < position.byteOffset ? TailPosition() : position
+        var carry = String(data: start.partialBytes, encoding: .utf8) ?? ""
         var lines: [String] = []
-        while offset < size {
-            // FileHandle.readData(ofLength:) can SHORT-READ after a backward
-            // seek — accumulate until the chunk is full or the file ends.
-            var chunk = Data()
-            let want = min(chunkSize, size - offset)
-            while chunk.count < want {
-                let piece = try handle.read(upToCount: want - chunk.count) ?? Data()
-                guard !piece.isEmpty else { break }
-                chunk.append(piece)
-            }
-            guard !chunk.isEmpty else { break }
-            // A nil UTF-8 decode (boundary inside a multi-byte sequence) yields
-            // an empty text: carry threads through, the line completes later.
-            let text = String(data: chunk, encoding: .utf8) ?? ""
-            let result = try onChunk(.init(text: text, offset: offset, carry: carry))
+        var undecoded = carry.isEmpty ? start.partialBytes : Data()
+        let offset = try readChunks(handle: handle, offset: start.byteOffset, size: size, chunkSize: chunkSize) { chunk, offset in
+            undecoded.append(chunk)
+            guard let text = String(data: undecoded, encoding: .utf8) else { return }
+            let result = try onChunk(.init(text: text, offset: offset + chunk.count - undecoded.count, carry: carry))
             lines += result.newLines
-            offset += chunk.count
             carry = result.position.partialCarry
+            undecoded.removeAll(keepingCapacity: true)
         }
-        return TailReadResult(
-            newLines: lines,
-            position: TailPosition(byteOffset: offset, partialCarry: carry)
-        )
+        var next = TailPosition(byteOffset: offset, partialCarry: carry)
+        next.partialBytes.append(undecoded)
+        return TailReadResult(newLines: lines, position: next)
     }
 
     public struct Chunk: Sendable {
         public var text: String
         public var offset: Int
-        /// Carry from the previous chunk (or file position) — completes this
-        /// chunk's first line when it split a boundary.
         public var carry: String
     }
 
-    /// Split one chunk into complete lines. `carry` prepends the first line;
-    /// a trailing fragment becomes the outgoing carry. The fragment is NOT
-    /// re-read: the caller's offset already advanced past the chunk's bytes.
-    private static func splitLines(carrying carry: String, chunk: String, byteOffset: Int) -> TailReadResult {
-        let text = carry + chunk
-        let complete: Substring
-        let carryOut: String
-        if let lastNewline = text.lastIndex(of: "\n") {
-            complete = text[...lastNewline]
-            carryOut = String(text[text.index(after: lastNewline)...])
-        } else {
-            // No newline anywhere: everything is fragment.
-            complete = ""
-            carryOut = text
+    private static func readChunks(
+        handle: FileHandle, offset: Int, size: Int, chunkSize: Int,
+        _ body: (Data, Int) throws -> Void
+    ) throws -> Int {
+        precondition(chunkSize > 0)
+        try handle.seek(toOffset: UInt64(offset))
+        var offset = offset
+        while offset < size {
+            let count = try autoreleasepool { () throws -> Int in
+                var chunk = Data()
+                let want = min(chunkSize, size - offset)
+                while chunk.count < want {
+                    let piece = try handle.read(upToCount: want - chunk.count) ?? Data()
+                    guard !piece.isEmpty else { break }
+                    chunk.append(piece)
+                }
+                if !chunk.isEmpty { try body(chunk, offset) }
+                return chunk.count
+            }
+            guard count > 0 else { break }
+            offset += count
         }
-        let lines = complete.split(separator: "\n", omittingEmptySubsequences: true).map(String.init)
-        return TailReadResult(
-            newLines: lines,
-            position: TailPosition(byteOffset: byteOffset + chunk.utf8.count, partialCarry: carryOut)
-        )
+        return offset
     }
 }
 
-/// Streaming line reader over FileHandle — bounded RSS regardless of file
-/// size. Replaces String(contentsOf:) whole-file reads.
+/// Streams UTF-8 lines, including a final unterminated line at EOF.
 public struct StreamingLineReader {
     private let url: URL
     private let chunkSize: Int
@@ -121,28 +131,9 @@ public struct StreamingLineReader {
     }
 
     public func forEachLine(_ body: (String) throws -> Void) throws {
-        let handle = try FileHandle(forReadingFrom: url)
-        defer { try? handle.close() }
-        var pending = Data()
-        while true {
-            let chunk = try handle.read(upToCount: chunkSize) ?? Data()
-            if chunk.isEmpty { break }
-            pending.append(chunk)
-            // Split only complete lines: the last (newline-less) element stays
-            // pending. A chunk boundary inside a multi-byte UTF-8 character is
-            // safe because pending is raw Data — String decoding happens only
-            // on newline-complete segments.
-            guard let lastNewline = pending.lastIndex(of: UInt8(ascii: "\n")) else { continue }
-            let complete = pending.prefix(through: lastNewline)
-            pending = pending.suffix(from: pending.index(after: lastNewline))
-            for line in complete.split(separator: UInt8(ascii: "\n"), omittingEmptySubsequences: true) {
-                if let text = String(data: Data(line), encoding: .utf8) {
-                    try body(text)
-                }
-            }
-        }
-        if let tail = String(data: pending, encoding: .utf8), !tail.isEmpty {
-            try body(tail)
+        let position = try TailReader.forEachLine(url: url, from: TailPosition(), chunkSize: chunkSize, body)
+        try autoreleasepool {
+            if let tail = String(data: position.partialBytes, encoding: .utf8), !tail.isEmpty { try body(tail) }
         }
     }
 
