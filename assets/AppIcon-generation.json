@@ -1,0 +1,13 @@
+{
+  "provider": "Luma Generations API",
+  "endpoint": "https://agents.lumalabs.ai/v1/generations",
+  "generation_id": "3f566292-4d02-449a-9ba7-67bb2780cc96",
+  "request": {
+    "model": "uni-1",
+    "type": "image",
+    "prompt": "Create a single finished premium macOS application icon for UsageHUD, a small desktop utility that monitors AI coding assistant token usage and remaining quotas. Square 1:1 composition, straight-on orthographic, no perspective. One large graphite-black rounded-square app tile centered on a plain white background, with the tile occupying 88 percent of the image width and height, generous smooth continuous corners. Inside the tile, one bold luminous mint-to-cyan circular progress gauge, a three-quarter arc open at the lower right, with a dim dark teal remainder track. Centered inside the gauge are exactly three substantial softly rounded vertical bars of ascending heights, in icy mint and turquoise. The arc and bars are a single clear recognizable visual mark. Premium restrained macOS visual language: subtle glass-enamel depth, precise bevels, beautiful soft light, crisp silhouette, rich near-black face. High contrast and simple substantial shapes that stay recognizable at 32 pixels. Symmetrical, exceptionally clean, polished professional utility app icon. No letters, no words, no numerals, no labels, no extra symbols, no robots, no brains, no watermarks, no device mockup. Render only this one icon, not a sheet of variants.",
+    "aspect_ratio": "1:1",
+    "output_format": "png"
+  },
+  "preparation": "Remove the connected exterior background, resize to 1024x1024, and package standard macOS icon sizes as ICNS."
+}

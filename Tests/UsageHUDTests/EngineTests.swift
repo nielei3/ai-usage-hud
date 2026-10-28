@@ -24,16 +24,16 @@ private func laClock(at localTime: String) -> ManualClock {
 }
 
 @Suite struct CandidateSetTests {
-    @Test func cutoffIsMinOfLocalMidnightAndNowMinus5h() {
+    @Test func cutoffUsesWeekLookbackAtLocalMidnight() {
         let clock = laClock(at: "00:30")
         let cutoff = WindowMath.candidateCutoff(now: clock.now(), clock: clock)
-        #expect(cutoff == clock.now().addingTimeInterval(-5 * 3600))
+        #expect(cutoff == clock.now().addingTimeInterval(-7 * 24 * 3600))
     }
 
-    @Test func cutoffFallsBackToNowMinus5hInsideFirstFiveHours() {
+    @Test func cutoffUsesWeekLookbackInsideFirstFiveHours() {
         let clock = laClock(at: "02:00")
         let cutoff = WindowMath.candidateCutoff(now: clock.now(), clock: clock)
-        #expect(cutoff == clock.now().addingTimeInterval(-5 * 3600))
+        #expect(cutoff == clock.now().addingTimeInterval(-7 * 24 * 3600))
     }
 }
 

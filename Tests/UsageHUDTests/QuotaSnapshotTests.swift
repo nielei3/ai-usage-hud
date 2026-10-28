@@ -32,7 +32,8 @@ private final class SnapshotCollector: @unchecked Sendable {
             feed: .init(
                 claudeRoot: dir,
                 codexRoot: dir,
-                claudeUsageCache: dir.appendingPathComponent("cache.json")
+                claudeUsageCache: dir.appendingPathComponent("cache.json"),
+                snapshotCacheURL: dir.appendingPathComponent("snapshot.json")
             ),
             clock: SystemClock()
         )
@@ -75,7 +76,8 @@ private final class SnapshotCollector: @unchecked Sendable {
             feed: .init(
                 claudeRoot: dir,
                 codexRoot: dir,
-                claudeUsageCache: dir.appendingPathComponent("cache.json")
+                claudeUsageCache: dir.appendingPathComponent("cache.json"),
+                snapshotCacheURL: dir.appendingPathComponent("snapshot.json")
             ),
             clock: SystemClock()
         )

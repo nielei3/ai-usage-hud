@@ -31,11 +31,15 @@ private final class SnapshotCollector: @unchecked Sendable {
         let firstLine = claudeLine(sessionId: "s1", input: 100, output: 50) + "\n"
         try Data(firstLine.utf8).write(to: fileURL)
 
+        let codexRoot = tempDir("codex-empty")
+        defer { try? FileManager.default.removeItem(at: codexRoot) }
+
         let engine = UsageEngine(
             feed: .init(
                 claudeRoot: claudeRoot,
-                codexRoot: tempDir("codex-empty"),
-                claudeUsageCache: claudeRoot.appendingPathComponent("cache.json")
+                codexRoot: codexRoot,
+                claudeUsageCache: claudeRoot.appendingPathComponent("cache.json"),
+                snapshotCacheURL: claudeRoot.appendingPathComponent("snapshot.json")
             ),
             clock: SystemClock()
         )

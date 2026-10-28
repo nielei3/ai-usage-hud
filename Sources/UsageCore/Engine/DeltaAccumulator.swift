@@ -22,6 +22,11 @@ public struct DeltaAccumulator {
         prevOutputs = [:]
     }
 
+    mutating func reset(fileKey: String) {
+        prevTotals[fileKey] = nil
+        prevOutputs[fileKey] = nil
+    }
+
     public mutating func absorb(
         row: CodexUsageRow,
         today: (Date) -> Bool,
