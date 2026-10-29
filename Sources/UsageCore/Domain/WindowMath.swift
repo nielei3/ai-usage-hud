@@ -4,8 +4,7 @@ public enum WindowMath {
     public static func candidateCutoff(now: Date, clock: UsageClock) -> Date {
         let midnight = clock.calendar.startOfDay(for: now)
         let fiveHoursBack = now.addingTimeInterval(-5 * 3600)
-        let sevenDaysBack = now.addingTimeInterval(-7 * 24 * 3600)
-        return min(midnight, fiveHoursBack, sevenDaysBack)
+        return min(midnight, fiveHoursBack)
     }
 
     public static func isToday(_ date: Date, now: Date, clock: UsageClock) -> Bool {

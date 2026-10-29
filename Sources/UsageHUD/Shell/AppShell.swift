@@ -53,13 +53,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         let button = item.button
+        if let icon = BrandIcon.load(name: "claude-icon") {
+            icon.isTemplate = true
+            icon.size = NSSize(width: 18, height: 18)
+            button?.image = icon
+            button?.image?.isTemplate = true
+        }
         Task { [engine] in
             await engine.setSink { snapshot in
                 Task { @MainActor in
                     store.ingest(snapshot)
-                    button?.title = StatusBarRenderer.text(
-                        for: snapshot, limitTokens: store.settings.fiveHourLimitTokens
-                    )
+                    _ = snapshot
                 }
             }
             await engine.setIncludeSidechains(store.settings.includeSidechains)
