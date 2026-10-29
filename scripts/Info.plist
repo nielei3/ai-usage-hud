@@ -6,6 +6,8 @@
     <string>dev.usagehud.UsageHUD</string>
     <key>CFBundleName</key>
     <string>UsageHUD</string>
+    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
     <key>CFBundleExecutable</key>
     <string>UsageHUD</string>
     <key>CFBundlePackageType</key>
