@@ -31,6 +31,18 @@ private struct ExpandablePanel: View {
     private var codexWeeklyPercent: Double? { snapshot.codex.rateLimits.first?.usedPercent }
     private var codexResetDate: Date? { snapshot.codex.rateLimits.first?.resetsAt }
 
+    /// The tighter of the two Claude gates — whichever hits 100% first locks
+    /// the user out, so the bubble shows the max of the two. nil when both
+    /// are unknown.
+    private var claudeBottleneckPercent: Double? {
+        switch (claude5hPercent, claudeWeeklyPercent) {
+        case let (five?, weekly?): return max(five, weekly)
+        case let (five?, nil): return five
+        case let (nil, weekly?): return weekly
+        case (nil, nil): return nil
+        }
+    }
+
     private var claudeCreditPercent: Double? {
         guard let limit = snapshot.claude.creditLimitUsd, limit > 0,
               let used = snapshot.claude.creditUsedUsd else { return nil }
@@ -49,9 +61,8 @@ private struct ExpandablePanel: View {
 
     private var claudeMetrics: [Metric] {
         let metric5h: Metric
-        let pct = claude5hPercent ?? 0
         let reset = snapshot.claude.fiveHourResetsAt.map { CountdownTime.format(from: $0) }
-        metric5h = Metric(percent: pct, label: "5h", valueText: nil, resetLabel: reset)
+        metric5h = Metric(percent: claude5hPercent, label: "5h", valueText: nil, resetLabel: reset)
 
         let metricWeekly: Metric
         if let wpct = claudeWeeklyPercent {
@@ -61,6 +72,13 @@ private struct ExpandablePanel: View {
             metricWeekly = Metric(percent: nil, label: "weekly", valueText: nil, resetLabel: nil)
         }
 
+        // Bottleneck first — the bubble's primary metric is metrics.first and
+        // must reflect whichever gate locks the user out first (the max of
+        // the two). The non-bottleneck follows so both remain visible.
+        let bottleneck = claudeBottleneckPercent
+        if let bottleneck, metricWeekly.percent == bottleneck, metricWeekly.percent != metric5h.percent {
+            return [metricWeekly, metric5h]
+        }
         return [metric5h, metricWeekly]
     }
 
