@@ -101,7 +101,7 @@ public struct CodexLineParser {
     private func window(_ raw: Any?) -> CodexRateLimitWindow? {
         guard let d = raw as? [String: Any] else { return nil }
         let minutes = intOf(d["window_minutes"])
-        let pct = doubleOf(d["used_percent"] ?? d["used_percent"]) ?? 0
+        let pct = NumericParsing.percent(d["used_percent"]) ?? 0
         guard let resets = doubleOf(d["resets_at"]) else { return nil }
         return CodexRateLimitWindow(
             windowMinutes: minutes,

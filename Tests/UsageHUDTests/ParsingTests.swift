@@ -122,3 +122,123 @@ private func fixture(_ parts: String...) -> String {
         #expect(parser.parse("garbage") == nil)
     }
 }
+
+@Suite struct CodexUsageResponseParsingTests {
+    @Test func parsesLiveRateLimitWindowsWhenIndividualLimitIsNull() throws {
+        let response = #"""
+        {
+            "rate_limit": {
+                "primary_window": {
+                    "used_percent": 100,
+                    "limit_window_seconds": 604800,
+                    "reset_at": 1800863999
+                },
+                "secondary_window": {
+                    "used_percent": 42.5,
+                    "limit_window_seconds": 18000,
+                    "reset_at": 1800086399
+                }
+            },
+            "spend_control": { "individual_limit": null }
+        }
+        """#.data(using: .utf8)!
+
+        let parsed = try #require(CodexUsageFetcher.parseResponse(response))
+        #expect(parsed.used == nil)
+        #expect(parsed.limit == nil)
+        #expect(parsed.rateLimits.map(\.windowMinutes) == [10080, 300])
+        #expect(parsed.rateLimits.map(\.usedPercent) == [100, 42.5])
+        #expect(parsed.rateLimits.map(\.resetsAt) == [
+            Date(timeIntervalSince1970: 1800863999),
+            Date(timeIntervalSince1970: 1800086399)
+        ])
+    }
+
+    @Test func keepsLegacyIndividualLimitParsing() throws {
+        let response = #"""
+        {
+            "spend_control": {
+                "individual_limit": { "used": "3.00", "limit": "50.00", "remaining": "47.00" }
+            }
+        }
+        """#.data(using: .utf8)!
+
+        let parsed = try #require(CodexUsageFetcher.parseResponse(response))
+        #expect(parsed.used == 3)
+        #expect(parsed.limit == 50)
+        #expect(parsed.remaining == 47)
+        #expect(parsed.usedPercent == 6)
+        #expect(parsed.rateLimits.isEmpty)
+    }
+
+    @Test func clampsFiniteUsedPercentAndDropsNonFiniteValues() throws {
+        let response = #"""
+        {
+            "rate_limit": {
+                "primary_window": {
+                    "used_percent": -10,
+                    "limit_window_seconds": 300,
+                    "reset_at": 1800000000
+                },
+                "secondary_window": {
+                    "used_percent": 140,
+                    "limit_window_seconds": 600,
+                    "reset_at": 1800000600
+                }
+            }
+        }
+        """#.data(using: .utf8)!
+
+        let parsed = try #require(CodexUsageFetcher.parseResponse(response))
+        #expect(parsed.rateLimits.map(\.usedPercent) == [0, 100])
+        #expect(parsed.rateLimits.allSatisfy { $0.usedPercent.isFinite && (0...100).contains($0.usedPercent) })
+
+        let nonFiniteResponse = #"""
+        {
+            "rate_limit": {
+                "primary_window": {
+                    "used_percent": "NaN",
+                    "limit_window_seconds": 300,
+                    "reset_at": 1800000000
+                }
+            }
+        }
+        """#.data(using: .utf8)!
+        let nonFiniteParsed = try #require(CodexUsageFetcher.parseResponse(nonFiniteResponse))
+        #expect(nonFiniteParsed.rateLimits.isEmpty)
+    }
+
+    @Test func roundTripsCodexDiskCacheWithoutToken() throws {
+        let original = CodexUsageFetcher.CreditData(
+            used: 3,
+            limit: 50,
+            remaining: 47,
+            usedPercent: 6,
+            rateLimits: [RateLimitWindow(
+                windowMinutes: 300,
+                usedPercent: 42.5,
+                resetsAt: Date(timeIntervalSince1970: 1_800_086_399)
+            )]
+        )
+
+        let object = CodexUsageFetcher.encodeDiskCache(original)
+        #expect(object["token"] == nil)
+        let json = try JSONSerialization.data(withJSONObject: object)
+        let decodedObject = try #require(JSONSerialization.jsonObject(with: json) as? [String: Any])
+        let restored = CodexUsageFetcher.decodeDiskCache(decodedObject)
+
+        #expect(restored == original)
+
+        let legacy = CodexUsageFetcher.decodeDiskCache([
+            "used": "3.00",
+            "limit": "50.00",
+            "remaining": "47.00",
+            "usedPercent": 6,
+        ])
+        #expect(legacy.used == 3)
+        #expect(legacy.limit == 50)
+        #expect(legacy.remaining == 47)
+        #expect(legacy.usedPercent == 6)
+        #expect(legacy.rateLimits.isEmpty)
+    }
+}

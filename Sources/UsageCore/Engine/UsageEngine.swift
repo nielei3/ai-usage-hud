@@ -294,20 +294,24 @@ public actor UsageEngine {
         var todayC = CodexTokenUsage()
         var rateLimits: [RateLimitWindow] = []
         var planType: String?
-        var creditBalance: Double?
         var sessionsC = Set<String>()
         var lastEvent: Date?
-        for (url, agg) in codexFiles.sorted(by: { $0.key.path < $1.key.path }) {
+        for (_, agg) in codexFiles.sorted(by: { $0.key.path < $1.key.path }) {
             todayC = todayC + agg.today
             sessionsC.formUnion(agg.sessions)
             if let event = agg.lastEvent, event > (lastEvent ?? .distantPast) {
                 lastEvent = event
                 rateLimits = agg.rateLimits
                 planType = agg.planType
-                creditBalance = agg.creditBalance
             }
         }
         let codexCache = quota.codex
+        // The live API is authoritative when it returned windows; session logs
+        // remain the fallback for older/offline responses.
+        let liveRateLimits = codexCache?.rateLimits ?? []
+        if !liveRateLimits.isEmpty {
+            rateLimits = liveRateLimits
+        }
         let codex = UsageSnapshot.Codex(
             todayUsage: todayC, rateLimits: rateLimits, planType: planType,
             creditBalance: codexCache?.used,

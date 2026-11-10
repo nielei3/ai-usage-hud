@@ -67,6 +67,70 @@ private final class SnapshotCollector: @unchecked Sendable {
         #expect(snap.codex.creditLimit == 50.0)
     }
 
+    @Test func liveCodexRateLimitsOverrideSessionWindowsInSnapshot() async {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("quota-live-codex-\(UUID().uuidString)")
+        try! FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let codexFile = dir.appendingPathComponent("codex.jsonl")
+        let sessionWindow = #"{"timestamp":"2026-10-01T00:00:00Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":1,"output_tokens":1}},"rate_limits":{"primary":{"window_minutes":300,"used_percent":25,"resets_at":1800000000}}}}"#
+        try! Data((sessionWindow + "\n").utf8).write(to: codexFile)
+
+        let engine = UsageEngine(
+            feed: .init(
+                claudeRoot: dir,
+                codexRoot: dir,
+                claudeUsageCache: dir.appendingPathComponent("cache.json"),
+                snapshotCacheURL: dir.appendingPathComponent("snapshot.json")
+            ),
+            clock: SystemClock()
+        )
+        let collector = SnapshotCollector()
+        await engine.setSink { collector.append($0) }
+        await engine.setQuota(QuotaSnapshot(codex: CodexUsageFetcher.CreditData(
+            rateLimits: [RateLimitWindow(
+                windowMinutes: 10_080,
+                usedPercent: 100,
+                resetsAt: Date(timeIntervalSince1970: 1_800_863_999)
+            )]
+        )))
+        await engine.rescanAll()
+
+        let limits = collector.snapshots.last!.codex.rateLimits
+        #expect(limits.map(\.windowMinutes) == [10_080])
+        #expect(limits.map(\.usedPercent) == [100])
+        #expect(limits.first?.resetsAt == Date(timeIntervalSince1970: 1_800_863_999))
+    }
+
+    @Test func emptyLiveCodexQuotaKeepsSessionWindowsInSnapshot() async {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("quota-session-codex-\(UUID().uuidString)")
+        try! FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let codexFile = dir.appendingPathComponent("codex.jsonl")
+        let sessionWindow = #"{"timestamp":"2026-10-01T00:00:00Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":1,"output_tokens":1}},"rate_limits":{"primary":{"window_minutes":300,"used_percent":25,"resets_at":1800000000}}}}"#
+        try! Data((sessionWindow + "\n").utf8).write(to: codexFile)
+
+        let engine = UsageEngine(
+            feed: .init(
+                claudeRoot: dir,
+                codexRoot: dir,
+                claudeUsageCache: dir.appendingPathComponent("cache.json"),
+                snapshotCacheURL: dir.appendingPathComponent("snapshot.json")
+            ),
+            clock: SystemClock()
+        )
+        let collector = SnapshotCollector()
+        await engine.setSink { collector.append($0) }
+        await engine.setQuota(QuotaSnapshot(codex: CodexUsageFetcher.CreditData()))
+        await engine.rescanAll()
+
+        let limits = collector.snapshots.last!.codex.rateLimits
+        #expect(limits.map(\.windowMinutes) == [300])
+        #expect(limits.map(\.usedPercent) == [25])
+        #expect(limits.first?.resetsAt == Date(timeIntervalSince1970: 1_800_000_000))
+    }
+
     @Test func burstOfTailPulseWithEmptyQuotaNeverCrashes() async {
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent("quota-burst-\(UUID().uuidString)")
         try! FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)

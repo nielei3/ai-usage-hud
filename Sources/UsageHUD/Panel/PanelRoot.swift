@@ -28,8 +28,13 @@ private struct ExpandablePanel: View {
 
     private var claude5hPercent: Double? { snapshot.claude.fiveHourPercent }
     private var claudeWeeklyPercent: Double? { snapshot.claude.weeklyPercent }
-    private var codexWeeklyPercent: Double? { snapshot.codex.rateLimits.first?.usedPercent }
-    private var codexResetDate: Date? { snapshot.codex.rateLimits.first?.resetsAt }
+    private var codexWeeklyWindow: RateLimitWindow? {
+        snapshot.codex.rateLimits.first(where: { $0.windowMinutes == 10080 })
+            ?? snapshot.codex.rateLimits.first
+    }
+
+    private var codexWeeklyPercent: Double? { codexWeeklyWindow?.usedPercent }
+    private var codexResetDate: Date? { codexWeeklyWindow?.resetsAt }
 
     /// The tighter of the two Claude gates — whichever hits 100% first locks
     /// the user out, so the bubble shows the max of the two. nil when both
@@ -101,7 +106,7 @@ private struct ExpandablePanel: View {
     private var codexMetrics: [Metric] {
         let pct = codexWeeklyPercent
         let reset = codexResetDate.map { CountdownTime.format(from: $0) }
-        return [Metric(percent: pct, label: "weekly", valueText: nil, resetLabel: reset)]
+        return [Metric(percent: pct, label: codexWeeklyWindow?.windowName ?? "weekly", valueText: nil, resetLabel: reset)]
     }
 
     var body: some View {
